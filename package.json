@@ -4,7 +4,7 @@
   "private": true,
   "description": "React.js homepage without JSX",
   "scripts": {
-    "start": "npx -y serve ."
+    "start": "node server.js"
   },
   "dependencies": {
     "cors": "^2.8.6",
