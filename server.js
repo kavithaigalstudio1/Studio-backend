@@ -4,6 +4,9 @@ const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
+app.set('etag', false);
+app.disable('x-powered-by');
+
 app.use(cors({
     origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -14,7 +17,7 @@ app.use(express.urlencoded({ limit: '500mb', extended: true }));
 
 // Connect to MongoDB
 mongoose.connect(process.env.MONGO_URI, {
-    dbName: 'Portfolio' // Explicitly set Database Name
+    dbName: 'Portfolio'
 })
     .then(() => console.log('MongoDB Connected to Portfolio Database...'))
     .catch(err => console.error('MongoDB connection error:', err));
@@ -22,7 +25,7 @@ mongoose.connect(process.env.MONGO_URI, {
 // Schemas & Models
 const ImageSchema = new mongoose.Schema({
     imageUrl: { type: String, required: true },
-    order: { type: Number, default: 0 },
+    order: { type: Number, default: 0, index: true },
     createdAt: { type: Date, default: Date.now }
 });
 
@@ -30,44 +33,49 @@ const MontageSchema = new mongoose.Schema({
     clientName: { type: String, required: true },
     url: { type: String, required: true },
     thumb: { type: String, required: true },
-    order: { type: Number, default: 0 },
+    order: { type: Number, default: 0, index: true },
     createdAt: { type: Date, default: Date.now }
 });
 
 const ReviewSchema = new mongoose.Schema({
     name: { type: String, required: true },
+    phone: { type: String },
     shootType: { type: String, required: true },
     stars: { type: Number, required: true, min: 1, max: 5 },
     reviewText: { type: String, required: true },
     createdAt: { type: Date, default: Date.now }
 });
 
-// Create models binding to exact collection names
-const GalleryModel = mongoose.model('Gallery', ImageSchema, 'gallary');
-const MontagesModel = mongoose.model('Montages', MontageSchema, 'montages');
-const ReviewModel = mongoose.model('Review', ReviewSchema, 'Reviews');
-
 const ReviewVideoSchema = new mongoose.Schema({
     title: { type: String, default: '' },
     videoUrl: { type: String, required: true },
     thumb: { type: String, default: '' },
-    order: { type: Number, default: 0 },
+    order: { type: Number, default: 0, index: true },
     createdAt: { type: Date, default: Date.now }
 });
-const ReviewVideoModel = mongoose.model('ReviewVideo', ReviewVideoSchema, 'ReviewVideos');
 
 const GalleryVideoSchema = new mongoose.Schema({
     title: { type: String, required: true },
     url: { type: String, required: true },
     thumb: { type: String, required: true },
-    order: { type: Number, default: 0 },
+    order: { type: Number, default: 0, index: true },
     createdAt: { type: Date, default: Date.now }
 });
 
-const GalleryVideoModel = mongoose.model('GalleryVideo', GalleryVideoSchema, 'Gallary video');
+const InnerPageImageSchema = new mongoose.Schema({
+    cardSlug: { type: String, required: true, index: true },
+    imageUrl: { type: String, required: true },
+    order: { type: Number, default: 0, index: true },
+    createdAt: { type: Date, default: Date.now }
+});
 
-// Portfolio Categories Mapping to Collections
-// Note: We keep the exact collection names to maintain connection with existing data
+const GalleryModel = mongoose.model('Gallery', ImageSchema, 'gallary');
+const MontagesModel = mongoose.model('Montages', MontageSchema, 'montages');
+const ReviewModel = mongoose.model('Review', ReviewSchema, 'Reviews');
+const ReviewVideoModel = mongoose.model('ReviewVideo', ReviewVideoSchema, 'ReviewVideos');
+const GalleryVideoModel = mongoose.model('GalleryVideo', GalleryVideoSchema, 'Gallary video');
+const InnerPageImageModel = mongoose.model('InnerPageImage', InnerPageImageSchema, 'inner_images');
+
 const portfolioModels = {
     'Portraits': mongoose.model('Portraits', ImageSchema, 'portait'),
     'Pre Weddings': mongoose.model('PreWeddings', ImageSchema, 'pre wedding'),
@@ -77,295 +85,255 @@ const portfolioModels = {
     'Engagement': mongoose.model('Engagement', ImageSchema, 'engaement')
 };
 
-// Middleware for request logging
-app.use((req, res, next) => {
-    console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+// ---- High-Speed In-Memory Cache (Sub-1ms Responses) ----
+const serverCache = new Map();
+const stringCache = new Map();
+const CACHE_TTL = 30 * 60 * 1000;
+
+const setCache = (key, data) => {
+    serverCache.set(key, { data, time: Date.now() });
+    stringCache.set(key, JSON.stringify(data));
+};
+
+const clearCache = () => {
+    serverCache.clear();
+    stringCache.clear();
+};
+
+const instantResponse = (keySuffix = '') => (req, res, next) => {
+    const key = keySuffix ? `${keySuffix}_${req.params[keySuffix] || ''}` : req.url.split('/api/')[1];
+    const data = stringCache.get(key);
+    if (data) {
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.removeHeader('Last-Modified');
+        return res.status(200).send(data);
+    }
     next();
-});
+};
 
-app.get('/api/admin/stats', async (req, res) => {
+// Optimized Routes
+app.get('/api/gallery', instantResponse(), async (req, res) => {
     try {
-        // Gallery stats
-        const galleryImageCount = await GalleryModel.countDocuments();
-        const galleryVideoCount = await GalleryVideoModel.countDocuments();
-
-        // Montages stats
-        const montageCount = await MontagesModel.countDocuments();
-
-        // Review stats
-        const reviewTextCount = await ReviewModel.countDocuments();
-        const reviewVideoCount = await ReviewVideoModel.countDocuments();
-
-        // Portfolio stats (sum across all categories)
-        let portfolioImageCount = 0;
-        for (const cat in portfolioModels) {
-            const count = await portfolioModels[cat].countDocuments();
-            portfolioImageCount += count;
-        }
-
-        res.json({
-            galleryImages: galleryImageCount,
-            galleryVideos: galleryVideoCount,
-            montages: montageCount,
-            reviewTexts: reviewTextCount,
-            reviewVideos: reviewVideoCount,
-            portfolioImages: portfolioImageCount
-        });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        const images = await GalleryModel.find().sort({ order: 1 }).lean();
+        const urls = images.map(img => img.imageUrl);
+        setCache('gallery', urls);
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.json(urls);
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ---- API Routes ----
-
-// Gallery
-app.get('/api/gallery', async (req, res) => {
-    try {
-        const images = await GalleryModel.find().sort({ order: 1 });
-        res.json(images.map(img => img.imageUrl));
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.post('/api/gallery', async (req, res) => {
-    try {
-        const { images } = req.body;
-        await GalleryModel.deleteMany({});
-        if (images && images.length > 0) {
-            const newImages = images.map((url, index) => ({ imageUrl: url, order: index }));
-            await GalleryModel.insertMany(newImages);
-        }
-        res.json({ message: 'Gallery updated successfully' });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// Portfolio Categories
-app.get('/api/portfolio/:category', async (req, res) => {
+app.get('/api/portfolio/:category', instantResponse('category'), async (req, res) => {
     try {
         const categoryName = req.params.category;
         const Model = portfolioModels[categoryName];
         if (!Model) return res.status(404).json({ error: 'Category not found' });
+        const images = await Model.find().sort({ order: 1 }).lean();
+        const urls = images.map(img => img.imageUrl);
+        setCache(`category_${categoryName}`, urls);
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.json(urls);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
-        const images = await Model.find().sort({ order: 1 });
-        res.json(images.map(img => img.imageUrl));
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+app.get('/api/montages', instantResponse(), async (req, res) => {
+    try {
+        const montages = await MontagesModel.find().sort({ order: 1 }).lean();
+        setCache('montages', montages);
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.json(montages);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/gallery-films', instantResponse(), async (req, res) => {
+    try {
+        const films = await GalleryVideoModel.find().sort({ order: 1 }).lean();
+        setCache('gallery-films', films);
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.json(films);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/review-videos', instantResponse(), async (req, res) => {
+    try {
+        const videos = await ReviewVideoModel.find().sort({ order: 1 }).lean();
+        setCache('review-videos', videos);
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.json(videos);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Inner Page Images Routes
+app.get('/api/inner-images/:cardSlug', async (req, res) => {
+    try {
+        const images = await InnerPageImageModel.find({ cardSlug: req.params.cardSlug }).sort({ order: 1 }).lean();
+        const urls = images.map(img => img.imageUrl);
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.json(urls);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/inner-images/:cardSlug', async (req, res) => {
+    try {
+        const { images } = req.body;
+        await InnerPageImageModel.deleteMany({ cardSlug: req.params.cardSlug });
+        if (images?.length) {
+            const CHUNK_SIZE = 10;
+            for (let i = 0; i < images.length; i += CHUNK_SIZE) {
+                const chunk = images.slice(i, i + CHUNK_SIZE);
+                await InnerPageImageModel.insertMany(chunk.map((url, idx) => ({
+                    cardSlug: req.params.cardSlug,
+                    imageUrl: url,
+                    order: i + idx
+                })));
+            }
+        }
+        clearCache();
+        res.json({ message: 'Success' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Admin Posts
+app.post('/api/gallery', async (req, res) => {
+    try {
+        const { images } = req.body;
+        await GalleryModel.deleteMany({});
+        if (images?.length) {
+            // Chunked insert to prevent 16MB limit issues
+            const CHUNK_SIZE = 10;
+            for (let i = 0; i < images.length; i += CHUNK_SIZE) {
+                const chunk = images.slice(i, i + CHUNK_SIZE);
+                await GalleryModel.insertMany(chunk.map((url, idx) => ({
+                    imageUrl: url,
+                    order: i + idx
+                })));
+            }
+        }
+        clearCache();
+        res.json({ message: 'Success' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/portfolio/:category', async (req, res) => {
     try {
-        const categoryName = req.params.category;
-        console.log(`Updating portfolio for category: ${categoryName}`);
-
-        const Model = portfolioModels[categoryName];
-        if (!Model) {
-            console.error(`Error: Model for category "${categoryName}" not found.`);
-            return res.status(404).json({ error: 'Category not found' });
-        }
-
+        const Model = portfolioModels[req.params.category];
+        if (!Model) return res.status(404).send('Not found');
         const { images } = req.body;
-        console.log(`Received ${images ? images.length : 0} images for ${categoryName}`);
-
         await Model.deleteMany({});
-        if (images && images.length > 0) {
-            const newImages = images.map((url, index) => {
-                // Warning if single image is too large for MongoDB (16MB BSON limit)
-                if (url.length > 20 * 1024 * 1024) { // ~20MB string is likely > 16MB BSON
-                    console.warn(`Warning: Image at index ${index} is very large (${Math.round(url.length / (1024 * 1024))}MB) and may fail to save.`);
-                }
-                return { imageUrl: url, order: index };
-            });
-            await Model.insertMany(newImages);
-            console.log(`Successfully saved ${newImages.length} images to ${categoryName}`);
+        if (images?.length) {
+            const CHUNK_SIZE = 10;
+            for (let i = 0; i < images.length; i += CHUNK_SIZE) {
+                const chunk = images.slice(i, i + CHUNK_SIZE);
+                await Model.insertMany(chunk.map((url, idx) => ({
+                    imageUrl: url,
+                    order: i + idx
+                })));
+            }
         }
-        res.json({ message: `${categoryName} gallery updated successfully` });
-    } catch (err) {
-        console.error(`Database Error for ${req.params.category}:`, err);
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// Montages
-app.get('/api/montages', async (req, res) => {
-    try {
-        const montages = await MontagesModel.find().sort({ order: 1 });
-        res.json(montages);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        clearCache();
+        res.json({ message: 'Success' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/montages', async (req, res) => {
     try {
         const { montages } = req.body;
-        console.log(`Updating Montages: Received ${montages ? montages.length : 0} items`);
-
         await MontagesModel.deleteMany({});
-        if (montages && montages.length > 0) {
-            const newMontages = montages.map((mon, index) => {
-                // Check for large Base64 strings in url or thumb
-                if ((mon.url && mon.url.length > 15 * 1024 * 1024) || (mon.thumb && mon.thumb.length > 15 * 1024 * 1024)) {
-                    console.warn(`Warning: Montage at index ${index} has a very large file. MongoDB documents must be under 16MB. Consider using external URLs for videos.`);
-                }
-                return { ...mon, order: index };
-            });
-            await MontagesModel.insertMany(newMontages);
-            console.log(`Successfully saved ${newMontages.length} montages.`);
-        }
-        res.json({ message: 'Montages updated successfully' });
-    } catch (err) {
-        console.error('Database Error for Montages:', err);
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// Reviews
-app.get('/api/reviews', async (req, res) => {
-    try {
-        const reviews = await ReviewModel.find().sort({ stars: -1, createdAt: -1 }).limit(6);
-        res.json(reviews);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.post('/api/reviews', async (req, res) => {
-    try {
-        const { name, shootType, stars, reviewText } = req.body;
-        const newReview = new ReviewModel({ name, shootType, stars, reviewText });
-        await newReview.save();
-        res.json({ message: 'Review submitted successfully' });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.delete('/api/reviews/:id', async (req, res) => {
-    try {
-        await ReviewModel.findByIdAndDelete(req.params.id);
-        res.json({ message: 'Review deleted successfully' });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// Review Videos
-app.get('/api/review-videos', async (req, res) => {
-    try {
-        const videos = await ReviewVideoModel.find().sort({ order: 1 }).limit(12); // Increased limit for both pages
-        res.json(videos);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.post('/api/review-videos', async (req, res) => {
-    try {
-        const { videos } = req.body;
-        await ReviewVideoModel.deleteMany({});
-        if (videos && videos.length > 0) {
-            const newVideos = videos.map((v, index) => ({
-                title: v.title || '',
-                videoUrl: v.videoUrl || v.url || '',
-                thumb: v.thumb || '',
-                order: index
-            }));
-            await ReviewVideoModel.insertMany(newVideos);
-        }
-        res.json({ message: 'Review videos updated successfully' });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// Gallery Films - Using dedicated "Gallary video" collection
-app.get('/api/gallery-films', async (req, res) => {
-    try {
-        const films = await GalleryVideoModel.find().sort({ order: 1 });
-        res.json(films);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        if (montages?.length) await MontagesModel.insertMany(montages.map((m, idx) => ({ ...m, order: idx })));
+        clearCache();
+        res.json({ message: 'Success' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/gallery-films', async (req, res) => {
     try {
         const { films } = req.body;
         await GalleryVideoModel.deleteMany({});
-        if (films && films.length > 0) {
-            const newVideos = films.map((f, index) => ({
-                title: f.title,
-                url: f.url,
-                thumb: f.thumb,
-                order: index
-            }));
-            await GalleryVideoModel.insertMany(newVideos);
-        }
-        res.json({ message: 'Gallery videos saved to dedicated collection successfully' });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        if (films?.length) await GalleryVideoModel.insertMany(films.map((f, idx) => ({ ...f, order: idx })));
+        clearCache();
+        res.json({ message: 'Success' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-const PORT = process.env.PORT || 5000;
+app.post('/api/review-videos', async (req, res) => {
+    try {
+        const { videos } = req.body;
+        await ReviewVideoModel.deleteMany({});
+        if (videos?.length) await ReviewVideoModel.insertMany(videos.map((v, idx) => ({ ...v, order: idx })));
+        clearCache();
+        res.json({ message: 'Success' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
-// ---- Contact Info (MongoDB collection: "contact") ----
+app.get('/api/reviews', async (req, res) => {
+    try {
+        const reviews = await ReviewModel.find().sort({ stars: -1, createdAt: -1 }).limit(10).lean();
+        res.json(reviews);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/reviews', async (req, res) => {
+    try {
+        const newReview = new ReviewModel(req.body);
+        await newReview.save();
+        clearCache();
+        res.json({ message: 'Review saved!' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/reviews/:id', async (req, res) => {
+    try {
+        await ReviewModel.findByIdAndDelete(req.params.id);
+        clearCache();
+        res.json({ message: 'Review deleted!' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 const ContactInfoSchema = new mongoose.Schema({
-    phone1: { type: String, default: '' },
-    phone2: { type: String, default: '' },
-    email: { type: String, default: '' },
-    address: { type: String, default: '' },
-    instagram: { type: String, default: '' },
-    whatsapp: { type: String, default: '' },
-    mapsUrl: { type: String, default: '' },
-    workingHours: { type: String, default: '' },
+    phone1: String, phone2: String, email: String, address: String,
+    instagram: String, whatsapp: String, mapsUrl: String, workingHours: String,
     updatedAt: { type: Date, default: Date.now }
 });
 const ContactInfoModel = mongoose.model('ContactInfo', ContactInfoSchema, 'contact');
 
-// GET contact info
 app.get('/api/contact-info', async (req, res) => {
     try {
-        let info = await ContactInfoModel.findOne({});
-        if (!info) {
-            info = await ContactInfoModel.create({
-                phone1: '+91 93846 84082',
-                phone2: '',
-                email: 'kavithaigalstudio@gmail.com',
-                address: 'Tamil Nadu, India',
-                instagram: 'https://www.instagram.com/kavithaigal_studio',
-                whatsapp: 'https://wa.me/919384684082',
-                mapsUrl: '',
-                workingHours: 'Mon – Sat: 9 AM – 7 PM'
-            });
-        }
-        res.json(info);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        const info = await ContactInfoModel.findOne({}).lean();
+        res.json(info || {});
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// PUT (update) contact info — admin only
+app.post('/api/contact-info', async (req, res) => {
+    try {
+        await ContactInfoModel.deleteMany({});
+        const info = new ContactInfoModel(req.body);
+        await info.save();
+        res.json({ message: 'Contact info saved!' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.put('/api/contact-info', async (req, res) => {
     try {
-        const update = { ...req.body, updatedAt: new Date() };
-        const info = await ContactInfoModel.findOne({});
-        if (!info) {
-            const created = await ContactInfoModel.create(update);
-            return res.json({ message: 'Contact info created successfully', data: created });
-        }
-        await ContactInfoModel.updateOne({}, { $set: update });
-        const updated = await ContactInfoModel.findOne({});
-        res.json({ message: 'Contact info updated successfully', data: updated });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        await ContactInfoModel.findOneAndUpdate({}, req.body, { upsert: true });
+        res.json({ message: 'Contact info updated!' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+app.get('/api/admin/stats', async (req, res) => {
+    try {
+        const stats = {
+            galleryImages: await GalleryModel.countDocuments(),
+            galleryVideos: await GalleryVideoModel.countDocuments(),
+            montages: await MontagesModel.countDocuments(),
+            reviewTexts: await ReviewModel.countDocuments(),
+            reviewVideos: await ReviewVideoModel.countDocuments(),
+            portfolioImages: 0,
+            innerPageImages: await InnerPageImageModel.countDocuments()
+        };
+        for (const cat in portfolioModels) stats.portfolioImages += await portfolioModels[cat].countDocuments();
+        res.json(stats);
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, "0.0.0.0", () => console.log(`Server running on 0.0.0.0:${PORT}`));
