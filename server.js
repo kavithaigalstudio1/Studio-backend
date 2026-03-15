@@ -15,6 +15,9 @@ app.use(cors({
 app.use(express.json({ limit: '500mb' }));
 app.use(express.urlencoded({ limit: '500mb', extended: true }));
 
+// Health Check route for UptimeRobot
+app.get('/', (req, res) => res.status(200).send('Backend is running!'));
+
 // Connect to MongoDB
 mongoose.connect(process.env.MONGO_URI, {
     dbName: 'Portfolio'
