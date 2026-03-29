@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const SOURCE_URI = 'mongodb+srv://balajisathyanarayanan09062004_db_user:B170604@photo-studio.hjovjto.mongodb.net/Portfolio?retryWrites=true&w=majority&appName=Photo-studio';
 
 // NEW DATABASE (TARGET)
-const TARGET_URI = 'mongodb+srv://Admin:Admin%40123@studio-database.dzoptoy.mongodb.net/Portfolio?appName=studio-database';
+const TARGET_URI = 'mongodb+srv://Admin:Admin@123@studio-database.dzoptoy.mongodb.net/Portfolio?appName=studio-database';
 
 const COLLECTIONS = [
     'gallary',
